@@ -1,0 +1,202 @@
+#!/bin/bash
+# A tool to help manage jira items via API
+
+function select_app_area () {
+  PS3='Choose functional area: '
+  options=("Activity" "Admin" "Automation" "Files" "Packages" "Back end" "Load and Performance" "ACI Platform" "Quit")
+  select opt in "${options[@]}"
+  do
+    case $opt in
+        "Activity")
+            epic=$(echo $epics | jq .activity | sed 's/"//g' )
+            break
+            ;;
+        "Admin")
+            epic=$(echo $epics | jq .admin | sed 's/"//g' )
+            break
+            ;;
+        "Automation")
+            epic=$(echo $epics | jq .auto | sed 's/"//g' )
+            break
+            ;;
+        "Files")
+            epic=$(echo $epics | jq .files | sed 's/"//g' )
+            break
+            ;;
+        "Packages")
+            epic=$(echo $epics | jq .packages | sed 's/"//g' )
+            break
+            ;;
+        "Back end")
+            epic=$(echo $epics | jq .be | sed 's/"//g' )
+            break
+            ;;
+        "Load and Performance")
+            epic=$(echo $epics | jq .load | sed 's/"//g' )
+            break
+            ;;
+        "ACI Platform")
+            epic=$(echo $epics | jq .platform | sed 's/"//g' )
+            break
+            ;;
+        "Quit")
+            break
+            ;;
+        *) echo "invalid option $REPLY $opt";;
+    esac
+  done
+}
+
+# Assigns parameter 1 to latest sprint
+function assign_to_sprint () {
+  if [[ "$sprint" = "Y" ]]; then
+    sprint=$(curl -u $user:$mypassword -X GET -H "Content-Type: application/json" $server/rest/agile/latest/board/155/sprint?state=active)
+    echo $sprint
+    sprint=$(echo $sprint | jq '.values[0].id' | sed 's/"//g')
+    curl -i -u $user:$mypassword -X POST -H "Content-Type: application/json" $server/rest/agile/latest/sprint/$sprint/issue -d '{"issues": ["'"$1"'"]}'
+  else
+    sprint='null'
+  fi
+}
+
+# Links parameter 1 parameter 2 both in the form a Jira key
+function link_ticket () {
+  curl -i -u $user:$mypassword -X POST -H "Content-Type: application/json" $server/rest/api/latest/issueLink -d '{"type": {"name": "Relates"},"inwardIssue": {"key": "'"$1"'"},"outwardIssue": {"key": "'"$2"'"}}'
+}
+
+configdir=$HOME/.jirahelperconfig
+epics='{"activity":"ACI-532","admin":"ACI-534","auto":"ACI-761","files":"ACI-506","packages":"ACI-505","be":"ACI-523","load":"ACI-517","platform":"ACI-504"}'
+
+while getopts ":h" opt; do
+  case ${opt} in
+    h)
+      echo "Usage:"
+      echo "    jirahelper -h                         Display this help message."
+      echo "    jirahelper install                    Setup config file."
+      echo "    jirahelper clone <ticket_id>          Clone given ticket to ACI"
+      echo "    jirahelper delete <ticket_id>         Delete ticket CANNOT BE UNDONE"
+      echo "    jirahelper create                     Create a new ACI ticket"
+      echo "    jirahelper get <ticket_id>            Get ticket details"
+      exit 0
+      ;;
+   \?)
+     echo "Invalid Option: -$OPTARG" 1>&2
+     exit 1
+     ;;
+  esac
+done
+shift $((OPTIND -1))
+
+subcommand=$1; shift  # Remove 'pip' from the argument list
+
+#TODO: Check to see if config file exists
+
+user=$(cat $configdir/config.json | jq .user | sed 's/"//g' )
+server=$(cat $configdir/config.json | jq .server | sed 's/"//g' )
+
+case "$subcommand" in
+  # Parse options to the install sub command
+  install)
+    read -p "Enter Jira Server (e.g. https://jira.mycompany.com): " jiraserver
+    read -p "Enter Jira Username (e.g. johndoe): " jirauser
+    mkdir -p $configdir
+    touch $configdir/config.json
+    echo "{" > $configdir/config.json
+    echo "  \"server\": \"$jiraserver\"", >> $configdir/config.json
+    echo "  \"user\": \"$jirauser\"" >> $configdir/config.json
+    echo "}" >> $configdir/config.json
+    shift  # Remove 'install' from the argument list
+
+    # Process package options
+    while getopts ":t:" opt; do
+      case ${opt} in
+        t )
+          target=$OPTARG
+          ;;
+        \? )
+          echo "Invalid Option: -$OPTARG" 1>&2
+          exit 1
+          ;;
+        : )
+          echo "Invalid Option: -$OPTARG requires an argument" 1>&2
+          exit 1
+          ;;
+      esac
+    done
+    shift $((OPTIND -1))
+    ;;
+  delete)
+    read -p "Are you sure you want to delete Jira ticket $1 | Yn: " response
+    if [[ "$response" = "Y" ]]; then
+      read -s -p "Enter Password for user $user: " mypassword
+      curl -i -u $user:$mypassword -X DELETE $server/rest/api/latest/issue/$1
+      exit 0
+    elif [[ "$response" = "n" ]]; then
+      echo "Nothing deleted!"
+      exit 0
+    else
+      echo "Invalid response"
+      exit 1
+    fi
+    shift  # Remove 'delete' from the argument list
+    ;;
+  clone)
+    select_app_area
+    read -p "Assign to current sprint? | Yn: " sprint
+    read -s -p "Enter Password for user $user: " mypassword
+    issue=$(curl -u $user:$mypassword -X GET $server/rest/api/latest/issue/$1)
+    description=$(echo $issue | jq '.fields.description' | sed 's/\\"//g' | sed 's/"//g')
+    summary=$(echo $issue | jq '.fields.summary' | sed 's/\\"//g' | sed 's/"//g')
+
+    echo $description
+    echo $summary
+    # Create Automation ticket
+    new=$(curl -u $user:$mypassword -X POST -H "Content-Type: application/json" $server/rest/api/latest/issue -d '{"fields": {"project": {"id": "10001"},"assignee": {"name": "'"$user"'"},"issuetype": {"name": "Task"},"description": "'"$description"'","summary": "'"Add Test Automation: $summary"'","customfield_10701": {"value": "To Be Automated"},"customfield_10006": "'"$epic"'","components": [{"name": "Webapps Automation"}]}}')
+    key=$(echo $new | jq '.key' | sed 's/"//g')
+    printf "\n$key\n"
+    assign_to_sprint $key
+    link_ticket $key $1
+
+    # Create manual test cases ticket
+    new=$(curl -u $user:$mypassword -X POST -H "Content-Type: application/json" $server/rest/api/latest/issue -d '{"fields": {"project": {"id": "10001"},"assignee": {"name": "'"$user"'"},"issuetype": {"name": "Task"},"description": "'"$description"'","summary": "'"Add Testrail Cases: $summary"'","customfield_10701": {"value": "Manual Only"},"customfield_10006": "'"$epic"'","components": [{"name": "Webapps Automation"}]}}')
+    key2=$(echo $new | jq '.key' | sed 's/"//g')
+    printf "\n$key2\n"
+    assign_to_sprint $key
+    link_ticket $key2 $1
+
+    # Link tickets
+    link_ticket $key $key2
+
+    printf "\n\nhttps://jira.aspera.us/browse/$key\n\n"
+    printf "\n\nhttps://jira.aspera.us/browse/$key2\n\n"
+    shift  # Remove 'clone' from the argument list
+    exit 0
+    ;;
+  get)
+    read -s -p "Enter Password for user $user: " mypassword
+    curl -u $user:$mypassword -X GET $server/rest/api/latest/issue/$1
+    shift  # Remove 'get' from the argument list
+    exit 0
+    ;;
+  sprint)
+    read -p "Assign to current sprint? | Yn: " sprint
+    read -s -p "Enter Password for user $user: " mypassword
+    key=$1
+    assign_to_sprint
+    exit 0
+    ;;
+  create)
+    select_app_area
+    read -p "What is the name of this Task?: " summary
+    read -p "And a description?: " description
+    echo 'Thanks!'
+    read -p "Assign to current sprint? | Yn: " sprint
+    read -s -p "Enter Password for user $user: " mypassword
+    new=$(curl -u $user:$mypassword -X POST -H "Content-Type: application/json" $server/rest/api/latest/issue -d '{"fields": {"project": {"id": "10001"},"assignee": {"name": "'"$user"'"},"issuetype": {"name": "Task"},"description": "'"$description"'","summary": "'"$summary"'","customfield_10701": {"value": "To Be Automated"},"customfield_10006": "'"$epic"'","components": [{"name": "Webapps Automation"}]}}')
+    key=$(echo $new | jq '.key' | sed 's/"//g')
+    assign_to_sprint $key
+    printf "\n\nhttps://jira.aspera.us/browse/$key\n\n"
+    shift  # Remove 'create' from the argument list
+    exit 0
+    ;;
+esac
